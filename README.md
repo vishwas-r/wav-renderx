@@ -1,7 +1,7 @@
 # WAV RenderX
 ### Wave · Audio · Video · Render
-
 WAV RenderX is a high-performance, studio-quality audio visualizer designed to turn your music into stunning videos. Whether you're a content creator, musician, or just love seeing your sound come to life, WAV RenderX provides a sleek, professional interface to craft your perfect audio-visual experience.
+![WAV RenderX Screenshot](assets/screenshot.png)
 
 ---
 
