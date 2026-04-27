@@ -690,8 +690,22 @@ async function doExport() {
         if (msg) exSub.textContent = msg;
     }
     try {
-        if (typeof VideoEncoder !== 'undefined') await exportWebCodecs(w, h, setProgress);
-        else await exportMediaRecorder(w, h, setProgress);
+        let useWebCodecs = false;
+        if (typeof VideoEncoder !== 'undefined' && typeof AudioEncoder !== 'undefined') {
+            const vConfig = { codec: 'avc1.42E034', width: w, height: h, bitrate: 5_000_000, framerate: S.fps, latencyMode: 'realtime' };
+            const vSup = await VideoEncoder.isConfigSupported(vConfig);
+            if (vSup.supported) useWebCodecs = true;
+        }
+        if (useWebCodecs) {
+            try {
+                await exportWebCodecs(w, h, setProgress);
+            } catch (err) {
+                console.error('WebCodecs failed, falling back:', err);
+                await exportMediaRecorder(w, h, setProgress);
+            }
+        } else {
+            await exportMediaRecorder(w, h, setProgress);
+        }
     } catch (e) { console.error(e); exSub.textContent = 'Error: ' + e.message; await sleep(2500); }
     ec.style.display = 'none'; exov.classList.remove('vis'); S.exporting = false;
 }
@@ -708,30 +722,46 @@ async function exportWebCodecs(w, h, setProgress) {
         const dur = audioBuffer.duration;
 
         const target = new ArrayBufferTarget();
+
+        const vBitrate = w >= 3840 ? 40_000_000 : w >= 1920 ? 10_000_000 : 5_000_000;
+        const vConfig = { codec: 'avc1.42E034', width: w, height: h, bitrate: vBitrate, framerate: S.fps, latencyMode: 'realtime' };
+        const vSup = await VideoEncoder.isConfigSupported(vConfig);
+        if (!vSup.supported) throw new Error("Video codec not supported by WebCodecs");
+
+        let aCodec = 'mp4a.40.2';
+        let aMuxerCodec = 'aac';
+        let aConfig = { codec: aCodec, sampleRate: audioBuffer.sampleRate, numberOfChannels: 2, bitrate: 192000 };
+        let aSup = await AudioEncoder.isConfigSupported(aConfig);
+        if (!aSup.supported) {
+            aCodec = 'opus';
+            aMuxerCodec = 'opus';
+            aConfig.codec = aCodec;
+            aSup = await AudioEncoder.isConfigSupported(aConfig);
+            if (!aSup.supported) throw new Error("Audio codec not supported by WebCodecs");
+        }
+
         const muxer = new Muxer({
             target,
             video: { codec: 'avc', width: w, height: h },
-            audio: { codec: 'aac', sampleRate: audioBuffer.sampleRate, numberOfChannels: 2 },
+            audio: { codec: aMuxerCodec, sampleRate: audioBuffer.sampleRate, numberOfChannels: 2 },
             firstTimestampBehavior: 'offset', fastStart: 'in-memory'
         });
 
         let isFinished = false;
-        const vBitrate = w >= 3840 ? 40_000_000 : w >= 1920 ? 10_000_000 : 5_000_000;
         const vEnc = new VideoEncoder({ 
             output: (ch, m) => { if (!isFinished) muxer.addVideoChunk(ch, m); }, 
-            error: e => console.error('VEnc:', e) 
+            error: e => { console.error('VEnc:', e); isFinished = true; } 
         });
-        vEnc.configure({ codec: 'avc1.4d0034', width: w, height: h, bitrate: vBitrate, framerate: S.fps });
+        vEnc.configure(vConfig);
 
         const aEnc = new AudioEncoder({ 
             output: (ch, m) => { if (!isFinished) muxer.addAudioChunk(ch, m); }, 
-            error: e => console.error('AEnc:', e) 
+            error: e => { console.error('AEnc:', e); isFinished = true; } 
         });
-        aEnc.configure({ codec: 'mp4a.40.2', sampleRate: audioBuffer.sampleRate, numberOfChannels: 2, bitrate: 192000 });
+        aEnc.configure(aConfig);
 
         const totalFrames = Math.floor(dur * S.fps);
         const fInt = 1e6 / S.fps;
-        const samplesPerFrame = Math.floor(audioBuffer.sampleRate / S.fps);
         const fftSize = 2048;
 
         setProgress(5, 'Encoding frames…');
@@ -757,41 +787,52 @@ async function exportWebCodecs(w, h, setProgress) {
         }
 
         for (let fc = 0; fc < totalFrames; fc++) {
-            if (!S.exporting) break;
+            if (!S.exporting || isFinished) break;
             const time = fc / S.fps;
             freqD = getFFT(time);
             renderFrame(ec, ectx, w, h);
             
-            let vf = new VideoFrame(ec, { timestamp: fc * fInt });
-            vEnc.encode(vf, { keyFrame: fc % (S.fps * 2) === 0 });
+            let vf = new VideoFrame(ec, { timestamp: Math.round(fc * fInt), duration: Math.round(fInt) });
+            if (vEnc.state === 'configured') vEnc.encode(vf, { keyFrame: fc % (S.fps * 2) === 0 });
             vf.close();
 
-            const audioTs = fc * fInt;
-            const L = audioBuffer.getChannelData(0).subarray(fc * samplesPerFrame, (fc + 1) * samplesPerFrame);
-            const R = audioBuffer.getChannelData(1).subarray(fc * samplesPerFrame, (fc + 1) * samplesPerFrame);
-            const interleaved = new Float32Array(L.length * 2);
-            for (let i = 0; i < L.length; i++) {
-                interleaved[i * 2] = L[i];
-                interleaved[i * 2 + 1] = R[i];
+            const numChans = audioBuffer.numberOfChannels;
+            const startSample = Math.min(Math.round(fc * audioBuffer.sampleRate / S.fps), audioBuffer.length);
+            const endSample = Math.min(Math.round((fc + 1) * audioBuffer.sampleRate / S.fps), audioBuffer.length);
+            const numFrames = endSample - startSample;
+            
+            if (numFrames > 0) {
+                const L = audioBuffer.getChannelData(0).subarray(startSample, endSample);
+                const R = audioBuffer.getChannelData(numChans > 1 ? 1 : 0).subarray(startSample, endSample);
+                const interleaved = new Float32Array(numFrames * 2);
+                for (let i = 0; i < numFrames; i++) {
+                    interleaved[i * 2] = L[i];
+                    interleaved[i * 2 + 1] = R[i];
+                }
+                const audioTs = (startSample / audioBuffer.sampleRate) * 1e6;
+                const ad = new AudioData({
+                    format: 'f32', sampleRate: audioBuffer.sampleRate,
+                    numberOfFrames: numFrames, numberOfChannels: 2,
+                    timestamp: Math.round(audioTs), data: interleaved
+                });
+                if (aEnc.state === 'configured') aEnc.encode(ad);
+                ad.close();
             }
-            const ad = new AudioData({
-                format: 'f32', sampleRate: audioBuffer.sampleRate,
-                numberOfFrames: L.length, numberOfChannels: 2,
-                timestamp: Math.round(audioTs), data: interleaved
-            });
-            aEnc.encode(ad); ad.close();
 
             if (fc % 15 === 0) {
                 setProgress(Math.round((fc / totalFrames) * 92) + 5);
                 await sleep(0);
             }
             
-            if (vEnc.encodeQueueSize > 40) {
-                while (vEnc.encodeQueueSize > 10) await sleep(20);
+            if (vEnc.state === 'configured' && vEnc.encodeQueueSize > 40) {
+                while (vEnc.state === 'configured' && vEnc.encodeQueueSize > 10) await sleep(20);
             }
         }
 
         if (S.exporting) {
+            if (vEnc.state !== 'configured' || aEnc.state !== 'configured') {
+                throw new Error("Encoder failed during encoding");
+            }
             setProgress(98, 'Finalizing MP4…');
             await vEnc.flush();
             await aEnc.flush();
