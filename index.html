@@ -116,6 +116,16 @@
                         <label class="ilbl">Title Margin-Top</label>
                         <input type="range" class="ri" id="titleYIn" min="0" max="200" value="26">
                     </div>
+                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-top:6px;">
+                        <div class="ig">
+                            <label class="ilbl">Cover Size</label>
+                            <input type="range" class="ri" id="coverScaleIn" min="20" max="300" value="100">
+                        </div>
+                        <div class="ig">
+                            <label class="ilbl">Cover Position (Y)</label>
+                            <input type="range" class="ri" id="coverYIn" min="-50" max="50" value="0">
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -190,6 +200,17 @@
                     </div>
 
                     <div id="bgBlurred">
+                        <div class="crow" style="margin-bottom: 8px;">
+                            <div class="dz" id="bgImgDrop" style="flex: 1; padding: 12px; height: 60px; display: flex; flex-direction: column; justify-content: center; align-items: center;">
+                                <input type="file" id="bgImgIn" accept="image/*">
+                                <div class="dz-icon" style="font-size: 16px; margin: 0;"><i class="fa-solid fa-camera"></i></div>
+                                <div class="dz-lbl" style="font-size: 10px;">Upload separate background</div>
+                                <div class="dz-nm" id="bgImgNm" style="font-size: 9px;"></div>
+                            </div>
+                            <button id="bgImgReset" class="hdr-btn" title="Reset to Cover" style="height: 60px; width: 40px; display: none; flex-shrink: 0;">
+                                <i class="fa-solid fa-rotate-left"></i>
+                            </button>
+                        </div>
                         <div class="crow">
                             <span class="clbl">Overlay darkness</span>
                             <input type="range" class="ri" id="blurOverlay" min="0" max="85" value="45" style="flex:1">

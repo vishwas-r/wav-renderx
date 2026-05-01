@@ -1,5 +1,6 @@
 const S = {
-    audioFile: null, coverImg: null,
+    audioFile: null, coverImg: null, bgImg: null,
+    coverScale: 1.0, coverYOff: 0,
     title: '', artist: '', font: 'Syne',
     titleSize: 46, titleWeight: '800', titleY: 26,
     style: 'radialBars',
@@ -65,7 +66,7 @@ let bgCache = null;
 function invalidateBgCache() { bgCache = null; }
 
 function getBlurredBg(w, h) {
-    const img = S.coverImg;
+    const img = S.bgImg || S.coverImg;
     if (!img) return null;
     if (bgCache && bgCache.forImg === img && bgCache.forW === w && bgCache.forH === h && bgCache.forMode === S.blurMode && bgCache.forY === S.bgY) {
         return bgCache.canvas;
@@ -142,13 +143,13 @@ function hueColor(i, total, l = 65) {
 }
 
 function getCover(w, h) {
-    const sz = Math.min(w, h) * .37;
-    const cx = w / 2, cy = h / 2 - h * .035;
+    const sz = Math.min(w, h) * .37 * S.coverScale;
+    const cx = w / 2, cy = (h / 2 - h * .035) + (h * S.coverYOff);
     return { cx, cy, sz, x: cx - sz / 2, y: cy - sz / 2, r: sz / 2 };
 }
 
 function drawBg(c, w, h) {
-    if (S.background === 'blurred' && S.coverImg) {
+    if (S.background === 'blurred' && (S.bgImg || S.coverImg)) {
         const cached = getBlurredBg(w, h);
         if (cached) c.drawImage(cached, 0, 0);
         else {
@@ -298,7 +299,7 @@ function drawMorphBlob(c, w, h) {
 function drawMirrorBars(c, w, h) {
     const sc = w / 1920;
     const bars = 120, maxH = h * .34;
-    const sw = w * .88 / bars, sx = w * .06, cy = h * .52;
+    const sw = w * .88 / bars, sx = w * .06, cy = h * .52 + (h * S.coverYOff);
     c.save();
     for (let i = 0; i < bars; i++) {
         const fi = Math.floor((i / bars) * freqD.length * .72);
@@ -396,7 +397,7 @@ function drawParticles(c, w, h) {
 
 function drawNeonArc(c, w, h) {
     const sc = w / 1920;
-    const cy = h * .64, amp = h * .22, pts = timeD.length, step = 4;
+    const cy = h * .64 + (h * S.coverYOff), amp = h * .22, pts = timeD.length, step = 4;
     c.save();
     const passes = S.glow ? 3 : 1;
     const alphas = [.08, .25, 1], widths = [14, 6, 2];
@@ -447,7 +448,7 @@ function drawKaleidoscope(c, w, h) {
 
 function drawFloatingBlocks(c, w, h) {
     const sc = w / 1920;
-    const maxH = h * .66, total = w * .88, sx = w * .06, baseY = h * .88;
+    const maxH = h * .66, total = w * .88, sx = w * .06, baseY = h * .88 + (h * S.coverYOff);
     const bw = (total / NUM_BARS) * .72, bsp = total / NUM_BARS, pkH = 4 * sc;
     c.save();
     for (let i = 0; i < NUM_BARS; i++) {
@@ -504,7 +505,7 @@ function drawSpectrogram(c, w, h) {
 function drawDNAHelix(c, w, h) {
     const sc = w / 1920;
     helixOff += .028;
-    const pts = 120, hlx = w * .72, sx = w * .14, cy = h * .5, amp = h * .17;
+    const pts = 120, hlx = w * .72, sx = w * .14, cy = h * .5 + (h * S.coverYOff), amp = h * .17;
     c.save();
     for (let i = 0; i < pts; i++) {
         const x = sx + (i / pts) * hlx, ang = (i / pts) * Math.PI * 4 + helixOff;
@@ -540,7 +541,7 @@ function drawDNAHelix(c, w, h) {
 function draw3DGrid(c, w, h) {
     gridHist.unshift(new Uint8Array(freqD));
     if (gridHist.length > 50) gridHist.pop();
-    const sc = w / 1920, rows = gridHist.length, cols = 48, hz = h * 0.45, maxBH = h * 0.28;
+    const sc = w / 1920, rows = gridHist.length, cols = 48, hz = h * 0.45 + (h * S.coverYOff), maxBH = h * 0.28;
     c.save();
     const pts = [];
     for (let r = 0; r < rows; r++) {
@@ -762,34 +763,85 @@ async function exportWebCodecs(w, h, setProgress) {
 
         const totalFrames = Math.floor(dur * S.fps);
         const fInt = 1e6 / S.fps;
-        const fftSize = 2048;
 
-        setProgress(5, 'Encoding frames…');
-        
-        function getFFT(time) {
-            const startIdx = Math.floor(time * audioBuffer.sampleRate);
-            const data = new Float32Array(fftSize);
-            const chan = audioBuffer.getChannelData(0);
-            for (let i = 0; i < fftSize; i++) {
-                const idx = startIdx + i;
-                data[i] = idx < chan.length ? chan[idx] : 0;
-            }
-            const freq = new Uint8Array(1024);
-            for (let i = 0; i < 1024; i++) {
-                let sum = 0, count = 4;
-                for (let j = 0; j < count; j++) {
-                    const val = Math.abs(data[(i * 2 + j) % fftSize]);
-                    sum += val;
-                }
-                freq[i] = Math.min(255, sum / count * 1500);
-            }
-            return freq;
+        setProgress(5, 'Analyzing audio spectrum…');
+        const samples = audioBuffer.getChannelData(0);
+        const fftSize = 4096;
+        const binCount = fftSize / 2;
+        const freqFrames = [];
+        const timeFrames = [];
+        const blackman = new Float32Array(fftSize);
+        const a0 = 0.42, a1 = 0.5, a2 = 0.08;
+        for (let i = 0; i < fftSize; i++) {
+            blackman[i] = a0 - a1 * Math.cos(2 * Math.PI * i / (fftSize - 1)) + a2 * Math.cos(4 * Math.PI * i / (fftSize - 1));
         }
 
+        // Simple FFT implementation
+        function performFFT(real, imag) {
+            const n = real.length;
+            for (let i = 1, j = 0; i < n; i++) {
+                let bit = n >> 1;
+                for (; j & bit; bit >>= 1) j ^= bit;
+                j ^= bit;
+                if (i < j) { [real[i], real[j]] = [real[j], real[i]]; [imag[i], imag[j]] = [imag[j], imag[i]]; }
+            }
+            for (let len = 2; len <= n; len <<= 1) {
+                const ang = -2 * Math.PI / len;
+                const wlen_r = Math.cos(ang), wlen_i = Math.sin(ang);
+                for (let i = 0; i < n; i += len) {
+                    let w_r = 1, w_i = 0;
+                    for (let j = 0; j < len / 2; j++) {
+                        const u_r = real[i + j], u_i = imag[i + j];
+                        const v_r = real[i + j + len / 2] * w_r - imag[i + j + len / 2] * w_i;
+                        const v_i = real[i + j + len / 2] * w_i + imag[i + j + len / 2] * w_r;
+                        real[i + j] = u_r + v_r; imag[i + j] = u_i + v_i;
+                        real[i + j + len / 2] = u_r - v_r; imag[i + j + len / 2] = u_i - v_i;
+                        const next_w_r = w_r * wlen_r - w_i * wlen_i;
+                        w_i = w_r * wlen_i + w_i * wlen_r; w_r = next_w_r;
+                    }
+                }
+            }
+        }
+
+        let prevFreq = new Float32Array(binCount);
+        const smoothing = 0.8;
+
+        for (let fc = 0; fc < totalFrames; fc++) {
+            if (fc % 100 === 0) setProgress(Math.round((fc / totalFrames) * 15) + 5, 'Analyzing spectrum…');
+            const time = fc / S.fps;
+            const startIdx = Math.floor(time * audioBuffer.sampleRate);
+            const real = new Float32Array(fftSize);
+            const imag = new Float32Array(fftSize);
+            const td = new Uint8Array(fftSize);
+            
+            for (let i = 0; i < fftSize; i++) {
+                const s = samples[startIdx + i] || 0;
+                td[i] = Math.min(255, Math.max(0, (s + 1) * 128));
+                real[i] = s * blackman[i];
+            }
+            performFFT(real, imag);
+            
+            const f = new Uint8Array(binCount);
+            for (let i = 0; i < binCount; i++) {
+                const mag = Math.sqrt(real[i] * real[i] + imag[i] * imag[i]) / fftSize;
+                let db = 20 * Math.log10(mag + 1e-9);
+                // Adjusting range to match common browser Analyser behavior
+                let val = (db + 95) * (255 / 65);
+                val = Math.max(0, Math.min(255, val));
+                prevFreq[i] = prevFreq[i] * smoothing + val * (1 - smoothing);
+                f[i] = prevFreq[i];
+            }
+            freqFrames[fc] = f;
+            timeFrames[fc] = td;
+        }
+
+        setProgress(20, 'Encoding frames…');
+        
         for (let fc = 0; fc < totalFrames; fc++) {
             if (!S.exporting || isFinished) break;
-            const time = fc / S.fps;
-            freqD = getFFT(time);
+            
+            freqD = freqFrames[fc] || freqFrames[fc - 1] || new Uint8Array(offAna.frequencyBinCount);
+            timeD = timeFrames[fc] || timeFrames[fc - 1] || new Uint8Array(offAna.fftSize).fill(128);
             renderFrame(ec, ectx, w, h);
             
             let vf = new VideoFrame(ec, { timestamp: Math.round(fc * fInt), duration: Math.round(fInt) });
@@ -870,6 +922,7 @@ async function exportMediaRecorder(w, h, setP) {
     await new Promise(resolve => {
         function frame() {
             if (!S.exporting) { rec.stop(); analyser.disconnect(aDst); return resolve(); }
+            getFreq();
             renderFrame(ec, ectx, w, h);
             const p = audioEl.currentTime / audioEl.duration; setP(Math.min(97, Math.round(p * 95) + 3));
             if (audioEl.ended || audioEl.currentTime >= audioEl.duration - .1) {
@@ -914,6 +967,23 @@ function loadCover(file) {
 document.getElementById('coverIn').addEventListener('change', e => { if (e.target.files[0]) loadCover(e.target.files[0]); });
 dragSetup(document.getElementById('coverDrop'), f => f.type.startsWith('image/'), loadCover);
 
+function loadBgImg(file) {
+    const nm = document.getElementById('bgImgNm');
+    nm.textContent = file.name; nm.style.display = 'block';
+    document.getElementById('bgImgReset').style.display = 'flex';
+    const img = new Image();
+    img.onload = () => { S.bgImg = img; invalidateBgCache(); };
+    img.src = URL.createObjectURL(file);
+}
+document.getElementById('bgImgIn').addEventListener('change', e => { if (e.target.files[0]) loadBgImg(e.target.files[0]); });
+dragSetup(document.getElementById('bgImgDrop'), f => f.type.startsWith('image/'), loadBgImg);
+document.getElementById('bgImgReset').addEventListener('click', () => {
+    S.bgImg = null;
+    document.getElementById('bgImgNm').style.display = 'none';
+    document.getElementById('bgImgReset').style.display = 'none';
+    invalidateBgCache();
+});
+
 function dragSetup(el, check, handler) {
     el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('over'); });
     el.addEventListener('dragleave', () => el.classList.remove('over'));
@@ -929,6 +999,8 @@ document.getElementById('artistIn').addEventListener('input', e => S.artist = e.
 document.getElementById('titleSizeIn').addEventListener('input', e => S.titleSize = +e.target.value);
 document.getElementById('titleWeightIn').addEventListener('change', e => S.titleWeight = e.target.value);
 document.getElementById('titleYIn').addEventListener('input', e => S.titleY = +e.target.value);
+document.getElementById('coverScaleIn').addEventListener('input', e => { S.coverScale = e.target.value / 100; invalidateBgCache(); });
+document.getElementById('coverYIn').addEventListener('input', e => { S.coverYOff = e.target.value / 100; invalidateBgCache(); });
 
 document.querySelectorAll('.sc').forEach(el => {
     el.addEventListener('click', () => {
@@ -1077,55 +1149,104 @@ document.getElementById('exCancel').addEventListener('click', () => {
 
 if (!freqD) { freqD = new Uint8Array(2048); timeD = new Uint8Array(2048); }
 
-// Background Drag Interaction
-let isDraggingBg = false;
-let startY = 0;
-let startBgY = 0.5;
+// Canvas Interaction: Dragging Background, Cover Art, or Resizing
+let dragType = null; // 'bg', 'cover', 'resize'
+let startMx, startMy, startV1, startV2;
 
 pc.addEventListener('mousedown', e => {
-    if (S.background !== 'blurred' || !S.coverImg || S.blurMode !== 'cover') return;
-    isDraggingBg = true;
-    startY = e.clientY;
-    startBgY = S.bgY;
-    pc.style.cursor = 'grabbing';
+    const rect = pc.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (pc.width / rect.width);
+    const my = (e.clientY - rect.top) * (pc.height / rect.height);
+    const { cx, cy, sz } = getCover(pc.width, pc.height);
+    const d = Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2);
+
+    if (d < sz / 2) {
+        dragType = 'cover';
+        startMy = e.clientY;
+        startV1 = S.coverYOff;
+        pc.style.cursor = 'grabbing';
+    } else if (d < sz / 2 + 40) {
+        dragType = 'resize';
+        startMx = e.clientX;
+        startMy = e.clientY;
+        startV1 = S.coverScale;
+        startV2 = d; // Initial distance for ratio-based scaling
+        pc.style.cursor = 'nwse-resize';
+    } else if (S.background === 'blurred' && (S.bgImg || S.coverImg) && S.blurMode === 'cover') {
+        dragType = 'bg';
+        startMy = e.clientY;
+        startV1 = S.bgY;
+        pc.style.cursor = 'grabbing';
+    }
 });
 
 window.addEventListener('mousemove', e => {
-    if (!isDraggingBg) return;
-    const dy = e.clientY - startY;
-    const canvasRect = pc.getBoundingClientRect();
-    const resH = RES[S.res].h;
-    const screenToReal = resH / canvasRect.height;
+    if (!dragType) return;
+    const rect = pc.getBoundingClientRect();
     
-    const img = S.coverImg;
-    const scale = Math.max(RES[S.res].w / img.width, resH / img.height);
-    const ih = img.height * scale;
-    const extraH = ih - resH;
-    
-    if (extraH > 0) {
-        const offsetPct = (dy * screenToReal) / extraH;
-        S.bgY = Math.max(0, Math.min(1, startBgY - offsetPct));
-        const bgYIn = document.getElementById('bgYIn');
-        if (bgYIn) bgYIn.value = Math.round(S.bgY * 100);
+    if (dragType === 'cover') {
+        const dy = e.clientY - startMy;
+        const hReal = RES[S.res].h;
+        const screenToReal = hReal / rect.height;
+        S.coverYOff = Math.max(-0.8, Math.min(0.8, startV1 + (dy * screenToReal / hReal)));
+        document.getElementById('coverYIn').value = Math.round(S.coverYOff * 100);
         invalidateBgCache();
+    } else if (dragType === 'resize') {
+        const mx = (e.clientX - rect.left) * (pc.width / rect.width);
+        const my = (e.clientY - rect.top) * (pc.height / rect.height);
+        const { cx, cy } = getCover(pc.width, pc.height);
+        const currD = Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2);
+        const ratio = currD / startV2;
+        S.coverScale = Math.max(0.1, Math.min(5, startV1 * ratio));
+        document.getElementById('coverScaleIn').value = Math.round(S.coverScale * 100);
+        invalidateBgCache();
+    } else if (dragType === 'bg') {
+        const dy = e.clientY - startMy;
+        const resH = RES[S.res].h;
+        const screenToReal = resH / rect.height;
+        const img = S.bgImg || S.coverImg;
+        const scale = Math.max(RES[S.res].w / img.width, resH / img.height);
+        const ih = img.height * scale;
+        const extraH = ih - resH;
+        if (extraH > 0) {
+            const offsetPct = (dy * screenToReal) / extraH;
+            S.bgY = Math.max(0, Math.min(1, startV1 - offsetPct));
+            const bgYIn = document.getElementById('bgYIn');
+            if (bgYIn) bgYIn.value = Math.round(S.bgY * 100);
+            invalidateBgCache();
+        }
     }
 });
 
 window.addEventListener('mouseup', () => {
-    if (isDraggingBg) {
-        isDraggingBg = false;
+    if (dragType) {
+        dragType = null;
         pc.style.cursor = '';
     }
 });
 
 pc.addEventListener('mouseenter', () => {
-    if (S.background === 'blurred' && S.coverImg && S.blurMode === 'cover') {
-        pc.style.cursor = 'grab';
-    }
+    // Proactive cursor hints
+    const { sz } = getCover(pc.width, pc.height);
+    // This will be updated on mousemove for precision, but set a default here
+});
+
+pc.addEventListener('mousemove', e => {
+    if (dragType) return;
+    const rect = pc.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (pc.width / rect.width);
+    const my = (e.clientY - rect.top) * (pc.height / rect.height);
+    const { cx, cy, sz } = getCover(pc.width, pc.height);
+    const d = Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2);
+
+    if (d < sz / 2) pc.style.cursor = 'grab';
+    else if (d < sz / 2 + 40) pc.style.cursor = 'nwse-resize';
+    else if (S.background === 'blurred' && (S.bgImg || S.coverImg) && S.blurMode === 'cover') pc.style.cursor = 'grab';
+    else pc.style.cursor = '';
 });
 
 pc.addEventListener('mouseleave', () => {
-    if (!isDraggingBg) pc.style.cursor = '';
+    if (!dragType) pc.style.cursor = '';
 });
 
 // Event listener for the new slider
